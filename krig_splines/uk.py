@@ -106,3 +106,54 @@ def gls_predict(K, P, y, nugget, Kstar, Pstar, weights=None):
     Minv_resid = np.linalg.solve(M, resid)
     f_star = np.asarray(Pstar) @ beta_hat + np.asarray(Kstar) @ Minv_resid
     return f_star, beta_hat
+
+
+def saddle_point_variance(K, P, nugget, Kstar, Pstar, Kstarstar, weights=None):
+    """Universal-Kriging / Theorem 2 predictive variance, sigma^2=1 units
+    (matching `saddle_point_solve`'s `nugget = tau^2/sigma^2` convention --
+    multiply the result by your own sigma^2 estimate if you need absolute
+    units).
+
+        Var[f(x*)] / sigma^2 = k(x*,x*) - [k(x*,X); P(x*)]^T C^-1 [k(x*,X); P(x*)]
+
+    where `C` is the same bordered matrix `saddle_point_solve` builds. This
+    is the Lagrange-multiplier/dual-kriging-weights form of the universal
+    kriging variance: solving `C @ [lambda; mu] = [k(x*,X); P(x*)]` gives the
+    kriging weights `lambda` and the trend's Lagrange multipliers `mu`, and
+    the variance is `k(x*,x*) - [k(x*,X); P(x*)]^T [lambda; mu]` -- so it
+    reuses `saddle_point_solve`'s bordered system with a different
+    right-hand side (`[k(x*,X); P(x*)]` instead of `[y; 0]`), including the
+    same diagonal equilibration (needed for the same reason: this system is
+    near-singular whenever the nugget or kernel matrix spans many orders of
+    magnitude).
+
+    `Kstar`, `Pstar`, `Kstarstar` may hold several query points at once:
+    `Kstar` is (n_query, n), `Pstar` is (n_query, q), `Kstarstar` is
+    (n_query,) (i.e. k(x*,x*) per query point, not the full query-by-query
+    Gram matrix). Returns an (n_query,) array.
+    """
+    K = np.asarray(K)
+    P = np.asarray(P)
+    n = K.shape[0]
+    q = P.shape[1]
+    Winv = np.eye(n) if weights is None else np.diag(1.0 / np.asarray(weights))
+
+    A = np.zeros((n + q, n + q))
+    A[:n, :n] = K + nugget * Winv
+    A[:n, n:] = P
+    A[n:, :n] = P.T
+
+    Kstar = np.atleast_2d(Kstar)
+    Pstar = np.atleast_2d(Pstar)
+    rhs = np.vstack([Kstar.T, Pstar.T])  # (n+q, n_query)
+
+    d = np.sqrt(np.abs(np.diag(A)))
+    d[d == 0] = 1.0
+    A_scaled = A / d[:, None] / d[None, :]
+    rhs_scaled = rhs / d[:, None]
+
+    sol_scaled, *_ = np.linalg.lstsq(A_scaled, rhs_scaled, rcond=None)
+    sol = sol_scaled / d[:, None]
+
+    quad = np.einsum("ij,ij->j", rhs, sol)
+    return np.asarray(Kstarstar) - quad
