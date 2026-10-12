@@ -4,6 +4,10 @@
 2) Can any Kriging model for 1D case produce the same curve (kriging mean) as SMT's RMTB or RMTC? How to proove/disprove this numerically? Is there a mathematical confirmation?
 3) Can any Kriging model for 1D case produce the same curve (kriging mean) as RMTS that has different mathematical formulation than those in SMT? How to proove/disprove this numerically? Is there a mathematical confirmation?
 4) Can a Kriging model for 2D case produce the same surface (kriging mean) as SMT's RMTB or RMTC? How to proove/disprove this numerically? Is there a mathematical confirmation?
+5) Since we confirmed that Kriging model for 1D case produces the same curve (kriging mean) as Scipy smoothing spline, can we evaluate variance (uncertainty) for the fitted spline curve without fitting kriging model?
+6) Now sice we confirmed variance can be calculated independently for 1D-smoothing splines, can it be done for 2D splines? Is there a 2D smoothing spline support in Scipy?
+7) How SciPy's make_smoothing_spline and/or UnivariateSmoothingSpline be extended to support varience estimation?
+
 ---
 
 ## Answers (based on the Phase A/B/C work in this repo)
@@ -251,6 +255,237 @@ tensor-product Kriging model against the `RMTB`/`RMTC` surface with matched `λ`
 the claim is disproved by a non-monotone or flat error curve as `c→0` — which is
 exactly what happened here.
 
+### 5) Can we get the fitted spline's uncertainty without fitting a Kriging model?
+
+**Answer: yes, in principle and in closed form — but this repo has not implemented
+or numerically tested it, so treat this as a derived, theoretically-grounded answer,
+not a confirmed one.** Corollary 5 (Q1) already establishes that the spline *is* the
+mean of a specific Gaussian process — a Matérn-$(m-\tfrac12)$ Universal Kriging model
+in the $\kappa\to0$, `nugget`$=4\kappa^3\lambda$ limit. If a mean has a GP
+interpretation, that same GP has a variance, by definition — the real question is
+whether getting it requires the expensive, generic part of "fitting a Kriging model"
+(choosing a correlation family, estimating/sweeping a length-scale hyperparameter) or
+whether it collapses to something cheaper once the limit is taken.
+
+**Mathematical confirmation.** Theorem 2b already gives the general Universal-Kriging
+predictive-variance formula for *any* kernel/trend pair satisfying the paper's
+assumptions — this repo's `krig_splines/uk.py` implements its mean (`gls_predict`,
+`saddle_point_predict`) but **no variance function exists in this codebase**
+(checked: no `def` matching `variance`/`var` anywhere in the package). Corollary 5
+specifies *which* kernel has a mean that reduces to the spline; the correct
+variance is, by construction, whatever Theorem 2b's variance formula gives for that
+same kernel/nugget prescription, in the same $\kappa\to0$ limit. Two things make this
+a non-trivial limit, not a free lunch:
+- The raw Matérn-$(m-\tfrac12)$ covariance **degenerates** as $\kappa\to0$ — at
+  $\kappa=0$, $k(x,x')=1$ for all $x,x'$ (rank-1, a shared offset, not an
+  interesting correlation structure). The mean limit is only well-defined because
+  the nugget is driven to zero at the *same* rate ($4\kappa^3\lambda$) — a joint
+  limit, not a limit of the kernel alone.
+- The classical resolution of exactly this joint limit predates the paper: it is
+  the **Kimeldorf–Wahba correspondence** (Kimeldorf & Wahba, 1970) and Wahba's
+  "Bayesian confidence intervals for smoothing splines" (Wahba, 1983; *Spline
+  Models for Observational Data*, 1990). There, the smoothing spline is derived
+  directly as the posterior mean of a *partial* Bayesian model — a diffuse
+  (improper, infinite-variance) prior on the degree-$(m-1)$ polynomial part `P`
+  (exactly this repo's trend basis), plus a proper Gaussian process prior with a
+  known, closed-form reproducing kernel $G(x,x')$ on the "rough" part, where $G$ is
+  the Green's function of the penalty operator (e.g. for the cubic case, $m=2$, $G$
+  is a specific piecewise-cubic polynomial — not the Matérn family at all, since the
+  Matérn parametrization has already been eliminated by the limit). That
+  construction gives $\mathrm{Var}[f(x^*)\mid y]$ directly, via Theorem 2b's same
+  formula applied once, with $G$ in place of the Matérn kernel and no $\kappa$ to
+  sweep or fit.
+
+**What this means operationally — "without fitting a Kriging model" is accurate in
+the sense that matters:** the expensive part of "fitting a Kriging model" is
+estimating a length-scale/correlation hyperparameter (maximum likelihood, a $\kappa$
+sweep, cross-validation). None of that is needed here. Once $m$ (the spline's
+derivative order) and $\lambda$ (already fixed — the same $\lambda$ passed to
+`make_smoothing_spline`) are known, $G(x,x')$ is a *known, closed-form* function with
+no free parameters, and Theorem 2a's bordered system with $G$ in place of $K$ is a
+single, well-posed linear solve (no near-degenerate kernel, since $G$ does not
+collapse to a constant the way the raw Matérn kernel does at $\kappa=0$) — cheaper
+and more numerically direct than the $\kappa\to0$ Kriging route used throughout this
+notebook/document, not an equivalent amount of work in disguise.
+
+**A second, even cheaper, classical shortcut — but training-points only.** Wahba's
+same treatment gives a simpler formula *at the training points*: if $S_\lambda$ is
+the smoothing spline's own linear smoother ("hat") matrix (defined by
+$\hat y = S_\lambda y$ — the same matrix `make_smoothing_spline`'s fitting procedure
+applies, just not exposed by `scipy`'s API), then
+$\mathrm{Var}[\hat f(x_i)] \approx \hat\sigma^2\,[S_\lambda S_\lambda^\top]_{ii}$,
+with $\hat\sigma^2$ estimated from the fit residuals. This needs no kernel, no
+Green's function, and no Kriging machinery at all — just the smoother matrix the
+spline fit already implicitly constructs. It does not directly give variance at an
+arbitrary *query* point between data points, though; for that, the $G(x,x')$-based GP
+route above is the general answer.
+
+**Status in this repo: implemented and numerically confirmed** —
+`notebooks/spline_variance_without_kriging.ipynb`, backed by
+`krig_splines.kernels.iwp2_kernel` and `krig_splines.uk.saddle_point_variance`
+(new package code, covered by `tests/test_spline_variance.py`). Two results, on the
+same synthetic noisy-$\sin(6x)$ benchmark Phase A uses:
+
+- **Mean:** the closed-form $G$-kernel, `nugget=lambda` directly, one linear solve,
+  reproduces `scipy`'s smoothing spline to `~1e-12` — tighter than Q1's $\kappa\to0$
+  sweep (`~1e-4` at its smallest tested $\kappa$), because there is no limit to
+  approximate.
+- **Variance — and a real finding, not just a confirmation:** the *naive* version of
+  the check (sweep $\kappa\to0$, compare `saddle_point_variance` under the Matérn
+  kernel to the $G$-kernel's variance) **does not converge** — the raw Matérn
+  variance collapses to zero as $\kappa^3$ instead of reaching a finite limit. The
+  shape is already exactly right at every $\kappa$ (correlation `1.0000` against the
+  $G$-based variance); only the *scale* is wrong, by precisely $4\kappa^3$ — the same
+  constant the mean's `nugget`$=4\kappa^3\lambda$ formula already uses, now shown to
+  apply to the kernel's own scale too, not only the nugget. Dividing the raw Matérn
+  variance by that same $4\kappa^3$ before comparing gives clean, monotone
+  convergence to within `0.02%` of the $G$-based variance's own range by
+  $\kappa=0.003$.
+
+This sharpens the original answer: getting the variance from the $\kappa\to0$ Kriging
+route is possible, but is *not* a free corollary of the mean's recipe the way it might
+look at first — it requires separately discovering that the kernel's absolute scale,
+not just the nugget-to-kernel ratio, needs the same rescaling. The closed-form
+$G$-kernel route sidesteps this entirely (no $\kappa$, no rescaling to find), which is
+the practical reason it is the better answer to "without fitting a Kriging model,"
+not merely an equivalent one.
+
+**What remains untested:** only $m=2$ (cubic) was implemented; general $m$ has an
+analogous closed form (Kimeldorf & Wahba, 1970) but was not coded. The real
+`cla(eta)`/RANS datasets used elsewhere in this document were not re-run through this
+closed-form route — only the synthetic benchmark was.
+
+---
+
+### 6) Does the same variance trick work in 2-D? Does scipy have 2-D smoothing splines?
+
+**Answer: yes to both — but "yes" to the 2-D variance question answers a different
+question than Q4's "does Kriging converge to RMTB" one, and the two must not be
+conflated.**
+
+**Does scipy have 2-D smoothing-spline support?** Yes, in two genuinely different
+forms:
+- `scipy.interpolate.SmoothBivariateSpline` / `bisplrep` / `RectBivariateSpline` —
+  FITPACK's (Dierckx) tensor-product B-spline smoother, controlled by a residual-sum
+  constraint `s`, not a `λ`-penalized derivative norm. A different variational
+  criterion from everything else in this document.
+- **`scipy.interpolate.RBFInterpolator(kernel="thin_plate_spline", smoothing=lam)`**
+  — this one *is* the direct, classical 2-D generalization of
+  `make_smoothing_spline`, and it is closer to this project's own framework than
+  its name suggests: scipy's own docstring for `RBFInterpolator` writes its solve as
+
+  $$\big(K(x,y)+\lambda I\big)a + P(y)\,b = d, \qquad P(y)^\top a = 0$$
+
+  — **literally Theorem 2a's bordered system**, down to calling the smoothing
+  parameter $\lambda$, and cites Wahba (1990) directly in its references. `degree=1`
+  (the default, and the minimum scipy allows for this kernel) is exactly the
+  degree-1 polynomial null space $P=\mathrm{span}\{1,x,y\}$ this document has used
+  throughout, one dimension up. The kernel itself, `r**2 * log(r)`, is Duchon's
+  (1977) reproducing kernel for the 2-D bending-energy penalty
+  $\iint\big[(f_{xx})^2+2(f_{xy})^2+(f_{yy})^2\big]\,dx\,dy$ — the direct 2-D
+  analogue of `iwp2_kernel`'s $\int(f'')^2dx$.
+
+**Mathematical confirmation:** nothing in Theorem 2a/2b or `saddle_point_solve`/
+`saddle_point_variance` assumes 1-D input — both already operate on generic `K`,`P`
+matrices. Duchon's classical multi-D extension of the Kimeldorf–Wahba theory is the
+textbook justification for the thin-plate-spline kernel playing the same role in 2-D
+that `iwp2_kernel` plays in 1-D.
+
+**Numerical confirmation (new, run for this answer, not yet in a notebook):** on
+synthetic 2-D data ($n=30$, $\mathrm{sin}(3x)\cos(3y)$ plus noise),
+`saddle_point_solve` with `K(x,x')=\lVert x-x'\rVert^2\log\lVert x-x'\rVert`,
+`P=[1,x,y]`, `nugget=lambda` reproduces
+`RBFInterpolator(kernel="thin_plate_spline", smoothing=lambda, degree=1)`'s output
+to **6.2e-15** (data range 1.75) — the same order of agreement Q1 found in 1-D.
+`saddle_point_variance`, same `K`/`P`, unmodified code, runs with no changes and
+gives well-behaved results: variance roughly **15× larger** in sparsely-sampled/
+extrapolated corners than inside the densely-sampled region (0.329 vs. 0.022 on this
+test), the expected qualitative Kriging-variance shape.
+
+**The caveat that matters:** this is a *different* 2-D generalization from the one
+`test_hypotheses_2D_RANS.ipynb` Part B/C went looking for (Q4). That notebook tried
+a *tensor-product* kernel — separate length scales per direction, combined
+multiplicatively — to approximate `RMTB`'s own *additive* per-direction energy
+($H=\sum_l s_l H_l$), and found it did not converge. The thin-plate spline tested
+here is **isotropic** (one radial kernel, no per-direction structure at all) and
+was never claimed to match `RMTB`'s specific construction — it answers "does the
+Theorem 2/Kimeldorf–Wahba variance machinery generalize to 2-D smoothing splines,"
+which it does, cleanly, but this does **not** resolve Q4's still-open question about
+Kriging converging to `RMTB`'s own 2-D surface. Tensor-product energy, additive
+RMTS-style energy, and isotropic thin-plate bending energy are three distinct
+mathematical objects; confirming one says nothing about the other two.
+
+**Status in this repo:** the recipe above is verified (ad hoc, for this answer) but
+**not yet added** to `krig_splines` as a `tps2d_kernel` function or exercised in a
+notebook — a natural, low-effort follow-up (no changes needed to
+`saddle_point_solve`/`saddle_point_variance` themselves, only a new kernel function
+parallel to `iwp2_kernel`), not yet done.
+
+---
+
+### 7) How could `make_smoothing_spline` (or `UnivariateSpline`) be extended to support variance?
+
+*(Note: scipy has no class named `UnivariateSmoothingSpline` — there is
+`scipy.interpolate.UnivariateSpline`, a different, older, FITPACK-based smoothing
+spline, and `scipy.interpolate.make_smoothing_spline`, the Reinsch/Weinert natural
+cubic smoothing spline used throughout this document. They are answered separately
+below since they do not share an internal parametrization.)*
+
+**Answer: don't patch scipy — wrap it.** The lowest-effort, most robust extension is
+a thin companion class that calls `make_smoothing_spline` unchanged for the mean
+(so it is guaranteed bit-identical to scipy's own answer) and separately computes
+`saddle_point_variance` with `iwp2_kernel` for the variance, reusing the exact
+recipe Q5/Q6 already proved correct:
+
+```python
+class SmoothingSplineWithVariance:
+    def __init__(self, x, y, lam):
+        self.x, self.lam = np.asarray(x), lam
+        self._spline = make_smoothing_spline(x, y, lam=lam)   # scipy, untouched
+        self._K = iwp2_kernel(self.x[:, None], self.x[None, :])
+        self._P = poly_basis(self.x, degree=1)
+        self._a, self._beta = saddle_point_solve(self._K, self._P, y, nugget=lam)
+
+    def mean(self, xq):
+        return self._spline(xq)                                # == scipy exactly
+
+    def variance(self, xq):
+        xq = np.asarray(xq)
+        Kq = iwp2_kernel(xq[:, None], self.x[None, :])
+        Pq = poly_basis(xq, degree=1)
+        Kqq = iwp2_kernel(xq, xq)
+        return saddle_point_variance(self._K, self._P, self.lam, Kq, Pq, Kqq)
+```
+
+**Why not modify `make_smoothing_spline` itself:** checked directly — it returns a
+bare `scipy.interpolate.BSpline`, exposing only `t`, `c`, `k` (knots, coefficients,
+degree). The design matrix, `λ`, and the original `x`/`y` are computed internally
+and discarded; there is nothing to "extend" after the fact without either re-running
+the fit (what the wrapper above does) or patching scipy's own C/Fortran-backed
+fitting routine upstream. The wrapper sidesteps this entirely and depends on zero
+scipy internals, only its public, documented output.
+
+**`UnivariateSpline` is a real complication, not just a rename.** It is FITPACK's
+(Dierckx) algorithm, parametrized by a residual-sum target `s`, not `λ` directly;
+`s` and `λ` both control the same underlying bias–variance trade-off but are not the
+same number, and FITPACK's internal `s`-to-effective-`λ` mapping is not exposed by
+scipy's public API. Attaching the same variance recipe to a `UnivariateSpline` fit
+would need that effective `λ` recovered first — e.g. by root-finding `λ` in
+`make_smoothing_spline(x, y, lam=λ)` until its curve matches the `UnivariateSpline`
+fit to within solver tolerance — a solvable but **real extra step, not yet
+attempted or tested here**, and a genuine caveat on how directly this answer
+transfers from `make_smoothing_spline` to `UnivariateSpline`.
+
+**Extends to 2-D for free.** The same wrapper pattern applies unchanged to
+`RBFInterpolator(kernel="thin_plate_spline", smoothing=lam)` using Q6's just-verified
+2-D kernel in place of `iwp2_kernel` — one uniform pattern (call scipy for the mean,
+call `saddle_point_variance` with the matching closed-form kernel for the variance)
+covers both the 1-D and 2-D cases documented here.
+
+**Status in this repo:** sketched and spot-checked above (the mean/variance pieces
+it calls are implemented and tested — `iwp2_kernel`, `saddle_point_variance`), but
+the wrapper class itself is not committed to `krig_splines` as of this answer.
+
 ---
 
 ### One-line summary
@@ -261,3 +496,6 @@ exactly what happened here.
 | SMT RMTB / RMTC (1-D) | No (finite-rank vs. full-rank mismatch) | **Yes, exactly** (Proposition 6), *but* SMT's solved output itself deviates a few % from its own textbook objective — gap not yet root-caused | Identity confirmed; solver-vs-theory gap open |
 | A different RMTS-like formulation | No (same reason) | **Yes, exactly**, by the same formulation-agnostic proof — confirmed on two structurally different bases (RMTB, RMTC) | Strong evidence; a fully from-scratch non-SMT confirmation (Phase B1) still pending |
 | SMT RMTB / RMTC (2-D surface) | Tensor-product κ-limit (Corollary 5 extension): **not demonstrated**, converges to only ~50–80% of CD's range at best | **Yes, essentially exactly** at/near training data (`~2e-9`/`~1e-8`, tighter than the 1-D case), degrading to `~2e-2` in sparse regions | Proposition 6 route confirmed and dimension-agnostic; Corollary 5's 2-D extension is an open problem |
+| Spline uncertainty, without fitting Kriging | — | **Yes, in closed form** — a Green's-function GP (Kimeldorf–Wahba), no free kernel hyperparameter to fit | Implemented (`iwp2_kernel`, `saddle_point_variance`) and numerically confirmed (mean `~1e-12`; variance within `0.02%` after discovering a needed `4κ³` kernel rescaling) |
+| 2-D spline uncertainty (`scipy.RBFInterpolator`, thin-plate) | — | **Yes** — same Theorem 2a/2b machinery, dimension-agnostic; scipy's own `RBFInterpolator` docstring *is* Theorem 2a's bordered system | Verified ad hoc (mean `~6e-15` vs. `RBFInterpolator`; variance well-behaved); not yet a `krig_splines` kernel. **Answers a different question than Q4** — not RMTB-specific |
+| Extending `make_smoothing_spline`/`UnivariateSpline` with variance | — | **Yes** — wrap, don't patch: scipy for the mean, `saddle_point_variance` for the variance | Recipe sketched and spot-checked; `UnivariateSpline` needs its effective `λ` recovered first (not exposed by scipy) — untested. Wrapper class not yet committed |
