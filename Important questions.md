@@ -7,10 +7,15 @@
 5) Since we confirmed that Kriging model for 1D case produces the same curve (kriging mean) as Scipy smoothing spline, can we evaluate variance (uncertainty) for the fitted spline curve without fitting kriging model?
 6) Now sice we confirmed variance can be calculated independently for 1D-smoothing splines, can it be done for 2D splines? Is there a 2D smoothing spline support in Scipy?
 7) How SciPy's make_smoothing_spline and/or UnivariateSmoothingSpline be extended to support varience estimation?
+8) Does SciPy's RBFInterpolator with "thin_plate_spline" kernel produces B-spline surface for 2D case? Can knots, and control points be extracted from fitted model?
+9) Is there direct N-D analogy of 'make_smoothing_spline' in SciPy or SMT, or any other python package? What is different between RMTS and make_smoothing_spline implementation? 
+10) Explain iwp2_kernel + saddle_point_solve methodoloy. Why we compare it against smoothing spline? Is it gausian process or spline fitting?
+11) Why our own matern32 implementation differs from SMT Kriging with "matern32" kernel? Are there extra hyperparameters we do not implement?
+12) Can RBFInterpolator fitted model be converted to B-Spline or Nurbs representation directly?
 
 ---
 
-## Answers (based on the Phase A/B/C work in this repo)
+## Answers (based on the Phase A/B/C work in this repo) 
 
 ### 1) Kriging vs. scipy smoothing splines
 
@@ -488,6 +493,300 @@ the wrapper class itself is not committed to `krig_splines` as of this answer.
 
 ---
 
+### 8) Is `RBFInterpolator`'s thin-plate-spline surface a B-spline? Can knots/control points be extracted?
+
+**Answer: no, and no.** `RBFInterpolator(kernel="thin_plate_spline")` does **not**
+produce a B-spline surface, and consequently has no knots or control points to
+extract — it is a different kind of object entirely, verified directly below rather
+than assumed.
+
+**What it actually is.** A fitted `RBFInterpolator` evaluates as
+
+$$f(x) = \sum_{i=1}^n a_i\,K(x, y_i) + P(x)^\top b, \qquad K(x,y)=\lVert x-y\rVert^2\log\lVert x-y\rVert$$
+
+— a sum of radial kernels **centered at the original training-data locations**
+$y_i$, plus the degree-1 polynomial trend, exactly Theorem 2a's bordered-system
+predictor (confirmed in Q6). A B-spline surface, by contrast, is
+
+$$f(x,y) = \sum_i\sum_j c_{ij}\, B_i(x)\, B_j(y)$$
+
+— a tensor product of **piecewise-polynomial basis functions defined on a knot
+vector**, with coefficients $c_{ij}$ ("control points") that sit at positions
+*implied by the knot spacing*, generally **not** at the data points at all. These
+are different mathematical objects with different structure, not two names for the
+same thing:
+
+| | `RBFInterpolator` (thin-plate) | `SmoothBivariateSpline` (real B-spline) |
+|---|---|---|
+| Basis support | **global** — every $K(x,y_i)$ is nonzero everywhere except exactly at $y_i$ | **local/compact** — each $B_i$ is nonzero only on a few knot intervals |
+| "Node" locations | the $n$ training points themselves | knots, placed by FITPACK's own algorithm, generally $\neq$ data points |
+| Coefficients | $n$ kernel weights + a small polynomial trend | control points, one per tensor-product basis pair |
+| Changing one coefficient | perturbs the **whole surface** (dense coupling) | perturbs only a **local patch** (compact support) |
+
+**Verified directly, not assumed** (checked both objects' real attributes in this
+session):
+- `RBFInterpolator` exposes `.y` (the $(n,2)$ training-point locations — these are
+  the kernel "centers," not knots), `.d` (training values), `._coeffs` (the
+  combined $[a;b]$ weight vector, $n+q$ entries for degree-1's $q=3$ polynomial
+  terms), and `.powers` (the monomial exponents defining $P$ — `[[0,0],[1,0],[0,1]]`
+  for degree 1, i.e. $\{1,x,y\}$). **No knot vector exists anywhere on the object**
+  — `dir(rbf)` has nothing named `t`, `tx`, `ty`, or `knots`.
+- `SmoothBivariateSpline`, by contrast, genuinely has them: `.get_knots()` returns
+  real `(tx, ty)` knot vectors, `.get_coeffs()` returns the real tensor-product
+  control-point array (length `(len(tx)-k-1)*(len(ty)-k-1)`), and `.degrees` gives
+  `(kx, ky)`. This is the object that actually has what Q8 is asking for — just not
+  the one Q6 used for the variance identity (Part 5 of
+  `notebooks/spline_variance_2d_vs_smt.ipynb` covers it, with no variance route,
+  per Q6/Q7's caveat).
+
+**One caveat found while checking this, worth being upfront about rather than
+glossing over:** `RBFInterpolator._coeffs` is a **private, underscore-prefixed**
+attribute — not documented, not guaranteed stable across scipy versions. It also
+turns out *not* to equal `krig_splines`'s own `[a; beta]` from `saddle_point_solve`
+directly (`max diff ≈ 0.51` on a quick check, not a rounding-level gap) — scipy
+internally shifts/scales the input coordinates first (`._shift`, `._scale`
+attributes, found when investigating the mismatch), the same kind of
+coordinate-normalization wrinkle Part 4 of `spline_variance_without_kriging.ipynb`
+had to reverse-engineer carefully for SMT's `KRG`. That reconciliation was **not**
+carried out here — flagged as unverified rather than claimed, since it is tangential
+to this question's actual answer (no knots exist either way) and would need the same
+careful, dedicated treatment the SMT case got, not a quick guess.
+
+**Practical takeaway:** if you specifically need a knot/control-point B-spline
+representation of a smoothed 2-D surface, use `SmoothBivariateSpline`/`bisplrep`
+(Part 5), not `RBFInterpolator`. If you need the exact Theorem 2a/Kimeldorf–Wahba
+variance machinery this document builds on, use `RBFInterpolator`/`SmoothingSpline2D`
+(Q6/Q7), not `SmoothBivariateSpline`. No scipy tool explored in this document gives
+both at once — they are genuinely different representations of "a smoothed surface,"
+not interchangeable implementations of the same idea.
+
+---
+
+### 9) Is there a direct N-D analogue of `make_smoothing_spline`? What actually differs between RMTS and `make_smoothing_spline`?
+
+**Part 1: a direct N-D analogue.** Yes — but "direct" splits into two genuinely
+different answers depending on which *algorithm family* you mean by "analogue," a
+distinction this document has already drawn (Q6/Q8) and that matters here too:
+
+- **`scipy.interpolate.RBFInterpolator(kernel="thin_plate_spline")`** is the
+  mathematically exact N-D generalization of the *same variational principle*
+  `make_smoothing_spline` solves (Duchon 1977's extension of Kimeldorf–Wahba to
+  $d$ dimensions) — and it is **not limited to 2-D**: its own docstring states
+  "Radial basis function interpolator in **N ≥ 1 dimensions**," confirmed already
+  in this document for $N=1,2$ (Q5/Q6). This is the same `λ`-penalized bending-energy
+  framework, same bordered system, same null-space-plus-kernel structure, just with
+  a different (global radial, not banded-1-D) solver underneath.
+- **`csaps`** (a separate PyPI package, **not** scipy or SMT — confirmed installed
+  and exercised directly for this answer, version `1.3.3`) is the more literal
+  algorithmic analogue: `csaps.NdGridCubicSmoothingSpline` is a genuine N-D
+  **tensor-product natural cubic smoothing spline**, the same algorithm family
+  `make_smoothing_spline` uses, extended dimension-by-dimension — confirmed by
+  running it (`NdGridCubicSmoothingSpline([gx, gy], Z, smooth=[0.9, 0.9])` fits and
+  evaluates correctly). Two things worth noting precisely, not glossed over:
+  **it requires data on a rectangular grid** (`xdata` is a *sequence* of 1-D
+  per-axis coordinate vectors, not scattered points — the same practical constraint
+  Part 5 found for `SmoothBivariateSpline`), and **it takes a separate smoothing
+  parameter per dimension** (`smooth=[0.9, 0.9]` above, confirmed via
+  `sp.smooth → (0.9, 0.9)`) — i.e. it is structurally an **additive/tensor-product**
+  construction, not an isotropic one. That makes it the one package in this answer
+  closer in *mathematical structure* to RMTS's own additive energy
+  ($H=\sum_l s_l H_l$) than to `RBFInterpolator`'s isotropic thin-plate energy — a
+  genuinely useful distinction for Part 2 below.
+- **scipy has no N-D version of `SmoothBivariateSpline`/`bisplrep`** — FITPACK's
+  `surfit` is bivariate only; there is no trivariate-or-beyond FITPACK smoothing
+  spline in scipy.
+- Not verified in this session (general knowledge only, flagged rather than
+  asserted as checked): R's `fields::Tps` is the same thin-plate-spline
+  construction as `RBFInterpolator` in a different language; general-purpose GP
+  packages (`GPy`, `GPflow`, `sklearn.gaussian_process`) could reproduce this
+  *in principle* via Corollary 5's own kernel construction, but none ship it as a
+  ready-made "smoothing spline" function — you would be hand-building the same
+  bordered system this repo's `krig_splines` already does, not calling a library
+  feature.
+
+**Part 2: RMTS vs. `make_smoothing_spline` — what is actually different.**
+Pulling together what Q1–Q8 already established into one direct comparison, rather
+than re-deriving it:
+
+| | `make_smoothing_spline` | RMTS (`RMTB`/`RMTC`) |
+|---|---|---|
+| Basis | **exact** — natural cubic spline, knots *at the data points*, rank $=n$ | **finite, user-chosen** — B-spline/Hermite basis on a separate grid over `xlimits`, rank $=$ `num_ctrl_pts` (independent of $n$; Q2's `m≫n` regime) |
+| Energy term | **exact** $\int (f'')^2\,dx$ | **quadrature approximation** of it, exactness controlled by `approx_order` — shown in this repo to matter a great deal (`approx_order=2` vs. the library default `4` gave a `2.6%` vs. `17.75%` gap to the target spline on the same slice, Q4's `num_ctrl_pts` follow-up) |
+| Solver | **direct, exact** banded linear algebra (de Boor/Reinsch/Weinert), one solve, no iteration | **iterative nonlinear solver** (Newton steps, `nonlinear_maxiter`/`line_search`) — confirmed in this repo to *not fully converge* at extreme `num_ctrl_pts`/data ratios (Q4's follow-up: error blew up to `149%` of range at `num_ctrl_pts=400`, `n=7`, only partially recovered by raising `nonlinear_maxiter`) |
+| Smoothness control | **one** scalar `lambda`, with a well-defined statistical meaning (GCV-computable) | **several, coupled** hyperparameters: `energy_weight` (not on the same absolute scale as `lambda` — Q2 found SMT's actual solve differs from the textbook objective built from its *own* `full_hess`/`full_jac_dict` by `~3.5-4.8%`, unresolved), `num_ctrl_pts`, `order`, `approx_order`, `smoothness` (per-dimension weights) |
+| Multi-D structure | 1-D only, natively; the true multi-D generalization of its *math* is `RBFInterpolator` (isotropic radial energy) | natively N-D, but via a **tensor-product basis and additive, per-dimension energy** $H=\sum_l s_l H_l$ — a third, different structure from both `RBFInterpolator`'s isotropic route and `csaps`'s per-axis-smoothing tensor route |
+| Exact GP/variance correspondence | **yes** — Corollary 5 (mean) and this document's own `saddle_point_variance` (variance), both numerically confirmed | **yes, via a different theorem** — Proposition 6, exact for the *idealized* finite-basis objective, but with the solver gap above meaning the *actual* RMTB/RMTC output is not bit-exact to that idealized objective |
+
+**The throughline, not a new finding but worth stating plainly here:** these
+differences are not incidental implementation details — they are the reason Q4's
+attempt to connect an isotropic Kriging limit to RMTB's 2-D surface failed to
+converge (`test_hypotheses_2D_RANS.ipynb`, and this document's own Part 3 of
+`spline_variance_2d_vs_smt.ipynb`). RMTS's additive, tensor-product energy is a
+**different mathematical object** from both the isotropic thin-plate energy
+Corollary 5's natural multi-D extension would need, and from `make_smoothing_spline`'s
+own exact 1-D construction — not merely a numerically harder version of the same
+thing.
+
+---
+
+### 10) What is `iwp2_kernel` + `saddle_point_solve`, actually? Is it a GP or a spline fit?
+
+**Short answer: it is provably, exactly both at once — that identity is not a
+coincidence, it is the entire mathematical content this project is built on.**
+
+**The methodology, precisely.** `iwp2_kernel(x,x') = min(x,x')^2(3\max(x,x')-
+\min(x,x'))/6` is the reproducing kernel of the "rough part" of the function space
+for the $m=2$ penalty $\int(f'')^2dx$ (Kimeldorf & Wahba, 1970 — the covariance of
+*twice-integrated Brownian motion*). `saddle_point_solve(K, P, y, nugget)` solves
+Theorem 2a's bordered system
+
+$$\begin{bmatrix}K+\text{nugget}\cdot I & P\\ P^\top & 0\end{bmatrix}
+\begin{bmatrix}a\\ \beta\end{bmatrix} = \begin{bmatrix}y\\ 0\end{bmatrix}$$
+
+with `K=iwp2_kernel`, `P=`degree-1 trend, `nugget=lambda`. This is the representer-
+theorem solution to minimizing $\|y-f(X)\|^2 + \lambda\int(f'')^2dx$ over
+$f=P\beta+h$ — i.e. it does not *approximate* the natural cubic smoothing spline,
+it *is* its normal-equations solve, via a different (kernel/bordered-system) route
+than `scipy`'s specialized banded algorithm.
+
+**Why compared against `make_smoothing_spline` at all:** because that comparison is
+a test of a *mathematical identity* (Kimeldorf–Wahba, via Theorem 2a), not a
+"how similar are two different things" exercise — confirmed in
+`spline_variance_without_kriging.ipynb` (Q5) to `~1e-12`, i.e. the two routes agree
+to the limits of floating-point arithmetic, exactly as an identity (rather than an
+approximation) predicts.
+
+**GP or spline fit — both, exactly, simultaneously:**
+- **As a spline fit:** the representer theorem shows the minimizer of the penalized
+  functional above is a natural cubic spline; the bordered system is that spline's
+  normal equations in a particular (kernel) basis.
+- **As a Gaussian process:** the *same* minimizer is exactly the posterior mean of
+  a Bayesian model — $w\sim\mathcal N(0,s^2A^{-1})$ (improper/diffuse prior on the
+  degree-1 trend, proper GP prior with covariance `iwp2_kernel` on the rough part),
+  $y_i\mid f\sim\mathcal N(f(x_i),\lambda s^2)$ — with `saddle_point_variance`
+  (same `K`, Theorem 2b) giving that GP's actual posterior variance, not an analogy
+  to one.
+
+These are not two compatible descriptions of similar objects; Kimeldorf & Wahba's
+theorem is precisely the statement that penalized-regression-minimizer and
+GP-posterior-mean are the *same function*, for this specific kernel/prior pairing.
+That equivalence is why Corollary 5, Proposition 6, and this project's entire
+"variance without fitting Kriging" line of work (Q5–Q9) are even meaningful
+questions to ask.
+
+---
+
+### 11) Why does `krig_splines.kernels.matern32` differ from SMT's `KRG(corr="matern32")`? What's missing?
+
+**Answer: three concrete, already-found-and-fixed conventions (not missing
+*capability*, missing *convention-matching*), plus one genuine, large, missing
+*capability* — automatic hyperparameter fitting.** All verified directly in
+`spline_variance_without_kriging.ipynb` Part 4, not assumed here:
+
+**The three convention differences** (closing them took SMT's own `optimal_theta`,
+`X_offset`/`X_scale`, and `optimal_par["sigma2"]` attributes, plus reading
+`krg_based.py`'s source directly):
+1. **SMT normalizes `X`** internally, `(X-X_offset)/X_scale` (mean/std of the
+   training data), before applying `theta` — our own `matern32(d, kappa)` operates
+   on raw, unnormalized `d`. To match, pass `theta = kappa_raw * X_scale` to SMT,
+   not `kappa_raw` directly.
+2. **SMT's `matern32` has an extra $\sqrt3$** baked into its formula — confirmed by
+   reading `Matern32.__call__`'s source: $r=(1+\sqrt3\,\theta d)e^{-\sqrt3\,\theta
+   d}$, not $(1+\theta d)e^{-\theta d}$ the way `krig_splines.kernels.matern32`
+   (and the paper's own Table 1 convention) defines it. `theta_smt =
+   \kappa_{raw}\cdot X_{scale}/\sqrt3` is the full, confirmed translation —
+   verified by reconstructing SMT's own correlation matrix from its Cholesky
+   factor and matching it to `krig_splines`'s `matern32` to `4e-16`.
+3. **SMT's `nugget` option is a numerical jitter** (default `~2.2e-14`), **not**
+   the $\tau^2/\sigma^2$ ratio `saddle_point_solve`'s `nugget` argument always is.
+   The real noise-to-signal ratio needs `eval_noise=True` + `noise0=[...]`, and
+   stays unoptimized only if `noise_bounds` is also collapsed to a point.
+
+**What's genuinely missing — not a convention, a capability:** `krig_splines` has
+**no hyperparameter optimizer at all**. `saddle_point_solve` is a pure *solver*:
+given `kappa`/`nugget`, it solves the linear system, nothing more. SMT's `KRG` is a
+full *estimator*: by default it also **fits** `theta` (and, if `eval_noise=True`,
+noise) via maximum likelihood, with `hyper_opt` (`TNC`/`Cobyla`), `theta_bounds`,
+and `n_start` (multistart) controlling that search. Every comparison in this
+document between "generic auto-tuned `KRG`" and a forced-`kappa` construction is
+precisely a comparison between SMT doing this extra work and this repo doing none
+of it — not a numerical artifact, the intended difference.
+
+**Smaller, real capability gaps, for completeness:**
+- **Heteroscedastic/per-point noise**: `saddle_point_solve` supports this via its
+  own `weights` argument (`Winv=diag(1/weights)`) — not missing, just not exposed
+  the way SMT's `noise0`-as-a-vector/`use_het_noise` is.
+- **Anisotropic/multi-D `theta`**: SMT's `theta` is a per-dimension vector in
+  N-D (confirmed in `spline_variance_2d_vs_smt.ipynb`, where `optimal_theta` came
+  back as a 2-vector); `krig_splines.kernels.matern32` takes a single scalar
+  `kappa` applied to whatever distance you hand it — isotropic unless the caller
+  builds an anisotropic kernel by hand (as Part 3/7 of that notebook did).
+- **Mixed categorical/hierarchical design spaces, multi-output, derivatives** — SMT
+  features with no `krig_splines` counterpart at all, irrelevant to the pure
+  continuous-input, single-output regression this project uses but real
+  differences in scope, not bugs.
+- **Jitter-based conditioning** (SMT's tiny default `nugget`) vs. **diagonal
+  equilibration** (`saddle_point_solve`'s own fix, Phase A1) — two different
+  strategies for the same near-singularity problem, neither "missing" from the
+  other, just different design choices already made deliberately in this repo.
+
+---
+
+### 12) Can a fitted `RBFInterpolator` be converted directly to a B-spline or NURBS representation?
+
+**Answer: no, not exactly, in general — and the reason is a hard mathematical
+one, not a missing scipy feature.** An *approximate* conversion is possible and
+was verified here; an *exact* one is only possible for specific kernel choices,
+consistent with Q8's finding that `RBFInterpolator` and B-splines are genuinely
+different representations.
+
+**Why an exact conversion generally cannot exist.** B-splines and NURBS are
+**piecewise polynomial** (NURBS: piecewise *rational* polynomial) functions. A
+fitted `RBFInterpolator` evaluates as $f(x)=\sum_i a_i K(x,y_i) + P(x)^\top b$
+(Q8). For `kernel="thin_plate_spline"` ($K(r)=r^2\log r$), each term is
+**transcendental** — $r^2\log r$ is not a polynomial, rational function, or
+piecewise version of either, on any interval containing $r=0$. A sum of
+transcendental terms is, in general, not exactly representable in *any*
+finite-dimensional B-spline/NURBS space, no matter how many knots are allowed —
+this is a statement about which function space the fitted model lives in, not a
+limitation of any particular software.
+
+**The one real exception, and it connects directly to this project's own 1-D
+work:** scipy's `RBFInterpolator` also offers `kernel="cubic"` ($K(r)=r^3$) and
+`kernel="linear"` ($K(r)=r$) — genuine **piecewise polynomials** in 1-D (cubic and
+linear respectively, with simple knots at the training points). The
+`one_d_smoothing_method_comparison.ipynb` work already confirmed
+`RBFInterpolator(kernel="cubic")` matches `make_smoothing_spline` to `~1.4e-9` —
+and `make_smoothing_spline` itself already *returns* a genuine
+`scipy.interpolate.BSpline` object (real `t`, `c`, `k`, confirmed in Q8). So for
+this one specific 1-D kernel choice, an exact B-spline representation doesn't just
+exist in principle, it's the *same object* scipy already computes a different way.
+
+**The practical, approximate route — verified here, not assumed:** for kernels
+without an exact polynomial form (`thin_plate_spline`, `gaussian`,
+`multiquadric`, ...), the standard technique is to evaluate the fitted
+`RBFInterpolator` on a dense grid and re-fit a genuine B-spline through those
+values (`SmoothBivariateSpline`/`bisplrep`, Part 5's tool, with `s` small). Tested
+just now, 2-D, `kernel="thin_plate_spline"`: re-fitting through a $25\times25$
+grid of RBF-predicted values gives `max|RBF − refit B-spline| ≈ 2.24e-3` against a
+data range of `1.80` (`~0.12%`) — a genuine, real B-spline (confirmed `21x21`
+knots via `get_knots()`), with an approximation error that shrinks as the
+sampling grid gets denser, but never reaches exactly zero for this kernel. This is
+a **re-fit**, not a conversion — it has its own resolution/knot-placement choices
+and its own (small, controllable) error, unlike the `kernel="cubic"` case above
+where no such error exists even in principle.
+
+**NURBS specifically:** not tested in this session (no NURBS-fitting package was
+exercised here) — flagged as general knowledge, not a verified claim: CAD/CAM
+software routinely fits NURBS surfaces to scattered or gridded data via
+least-squares, the same approximate-re-fit idea as the `SmoothBivariateSpline`
+route above, generalized to rational (not just polynomial) piecewise functions.
+Nothing in this project's own stack (`scipy`, `SMT`, `csaps`) was found to expose
+a NURBS fitting routine; a dedicated package would be needed and was not
+identified or verified here.
+
+---
+
 ### One-line summary
 
 | Target | Generic Kriging? | Exact-kernel Kriging? | Status |
@@ -499,3 +798,8 @@ the wrapper class itself is not committed to `krig_splines` as of this answer.
 | Spline uncertainty, without fitting Kriging | — | **Yes, in closed form** — a Green's-function GP (Kimeldorf–Wahba), no free kernel hyperparameter to fit | Implemented (`iwp2_kernel`, `saddle_point_variance`) and numerically confirmed (mean `~1e-12`; variance within `0.02%` after discovering a needed `4κ³` kernel rescaling) |
 | 2-D spline uncertainty (`scipy.RBFInterpolator`, thin-plate) | — | **Yes** — same Theorem 2a/2b machinery, dimension-agnostic; scipy's own `RBFInterpolator` docstring *is* Theorem 2a's bordered system | Verified ad hoc (mean `~6e-15` vs. `RBFInterpolator`; variance well-behaved); not yet a `krig_splines` kernel. **Answers a different question than Q4** — not RMTB-specific |
 | Extending `make_smoothing_spline`/`UnivariateSpline` with variance | — | **Yes** — wrap, don't patch: scipy for the mean, `saddle_point_variance` for the variance | Recipe sketched and spot-checked; `UnivariateSpline` needs its effective `λ` recovered first (not exposed by scipy) — untested. Wrapper class not yet committed |
+| `RBFInterpolator` (thin-plate) is a B-spline? | — | **No** — a global radial-kernel + polynomial predictor, not a knot/control-point tensor-product B-spline | Verified by inspecting both objects' real attributes; no knots exist on `RBFInterpolator`, `SmoothBivariateSpline` has them instead |
+| Direct N-D analogue of `make_smoothing_spline` | — | **Yes, two of them** — `RBFInterpolator` (isotropic, any N, exact Theorem 2a match) and the third-party `csaps` package (tensor-product, grid-only, per-axis smoothing — structurally closer to RMTS) | `csaps` installed and run directly for this answer; RMTS differs from `make_smoothing_spline` in basis, energy exactness, solver (iterative, confirmed non-convergent in extreme regimes), and smoothness-control structure |
+| `iwp2_kernel`+`saddle_point_solve`: GP or spline? | — | **Both, exactly, simultaneously** — Kimeldorf–Wahba's theorem, not an analogy | Confirmed to `~1e-12` against `make_smoothing_spline` (Q5); `saddle_point_variance` gives the same object's real GP posterior variance |
+| Why `krig_splines.matern32` ≠ SMT `KRG(matern32)` | — | **Three fixable conventions** (X-normalization, a hidden `√3`, nugget-vs-jitter) **+ one real capability gap**: no hyperparameter optimizer in `krig_splines` | All three conventions confirmed via SMT's own attributes/source; kernel matrices matched to `4e-16` once translated |
+| `RBFInterpolator` → B-spline/NURBS, directly? | — | **No, in general** (transcendental kernel, not piecewise polynomial) — **except `kernel="cubic"`/`"linear"` in 1-D**, which are exact B-splines already | Approximate re-fit verified (`~0.12%` error, grid+`SmoothBivariateSpline`); NURBS conversion not tested, general knowledge only |
