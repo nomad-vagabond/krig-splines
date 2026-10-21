@@ -183,11 +183,12 @@ def plot_std_slices(model, x1_grid, x2_grid, axis, slice_values, n_fine=300, tit
 def plot_models_1d_slices(models, labels, x1_grid, x2_grid, Z_noisy, axis, slice_values,
                           f_true=None, n_fine=300,
                           colors=("tab:blue", "tab:red", "tab:green", "tab:purple"),
-                          title=None, var_names=("x_1", "x_2")):
+                          title=None, var_names=("x_1", "x_2"), ncols=None):
     """Same two-band (CI+PI) style as plot_1d_slices, but overlaying any
     number of models' bands on the same panel for a direct comparison --
-    at most 2 panels per row. `models`/`labels` may be any length up to
-    `len(colors)`."""
+    at most 2 panels per row by default. `models`/`labels` may be any length
+    up to `len(colors)`. `ncols` overrides the default layout (e.g. to put
+    all of `slice_values` on one row)."""
     if len(models) > len(colors):
         raise ValueError(f"only {len(colors)} colors available for {len(models)} models; pass more colors")
     v_names = var_names if axis == 0 else tuple(reversed(var_names))
@@ -196,7 +197,7 @@ def plot_models_1d_slices(models, labels, x1_grid, x2_grid, Z_noisy, axis, slice
     t = np.linspace(vary_grid.min(), vary_grid.max(), n_fine)
 
     n = len(slice_values)
-    ncols = min(n, 2)
+    ncols = min(n, 2) if ncols is None else ncols
     nrows = int(np.ceil(n / ncols))
     fig, axes = plt.subplots(nrows, ncols, figsize=(6.4 * ncols, 4.0 * nrows),
                              squeeze=False, constrained_layout=True)
