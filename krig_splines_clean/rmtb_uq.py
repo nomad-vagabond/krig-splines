@@ -95,8 +95,8 @@ class RMTBUQ(RMTB):
 
         RMTB's own `regularization_weight`, at its usual default, leaves
         `full_hess` too near-singular to invert directly (a genuine null
-        space -- the unpenalized polynomial/bilinear trend, Q20 of
-        `Important questions.md` -- not just poor conditioning). This method
+        space -- the unpenalized polynomial/bilinear trend -- not just
+        poor conditioning). This method
         therefore refits a *separate*, regularization-boosted sibling model
         on the same training data to build the dual route, rather than using
         `self.full_hess` directly -- the boosted model's `sigma2`/`edf` are
@@ -108,7 +108,7 @@ class RMTBUQ(RMTB):
         ------
         RuntimeError
             If `cond(full_hess)` of the boosted sibling model still exceeds
-            `1e8` (the safety line derived in Q17 of `Important questions.md`)
+            `1e8` (this project's own numerical-safety line)
             -- i.e. if `regularization_boost` wasn't large enough. Do not
             silently return a number in that case; a larger
             `regularization_boost` is needed, or the dual route is not safe
@@ -130,8 +130,8 @@ class RMTBUQ(RMTB):
         if cond_H > 1e8:
             raise RuntimeError(
                 f"dual route unsafe at regularization_boost={regularization_boost:.0e}: "
-                f"cond(full_hess)={cond_H:.3e} exceeds the 1e8 safety line (Q17 of "
-                "Important questions.md). Try a larger regularization_boost."
+                f"cond(full_hess)={cond_H:.3e} exceeds the 1e8 safety line. "
+                "Try a larger regularization_boost."
             )
 
         Phi, _, _c = boosted.full_jac_dict[0]

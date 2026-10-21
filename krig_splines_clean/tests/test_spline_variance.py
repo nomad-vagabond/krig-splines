@@ -1,4 +1,4 @@
-"""Closed-form cubic-smoothing-spline variance (Important questions.md, Q5).
+"""Closed-form cubic-smoothing-spline variance.
 
 Two claims, each checked independently:
 

@@ -1,4 +1,4 @@
-"""`SmoothingSpline1D`/`SmoothingSpline2D` (Important questions.md, Q7): the
+"""`SmoothingSpline1D`/`SmoothingSpline2D`: the
 mean must be bit-identical to the scipy object each class wraps, and the
 variance must be well-behaved (finite, non-negative, larger away from data)
 even though scipy itself exposes no ground truth to compare it against.

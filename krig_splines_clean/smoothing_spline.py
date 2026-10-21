@@ -1,7 +1,6 @@
 """Wrapper classes giving scipy's smoothing splines a predictive variance.
 
-Answers `Important questions.md` Q7 (1-D) and Q6/Q7's 2-D extension: don't
-patch scipy, wrap it. Each class below calls the matching scipy constructor
+Don't patch scipy, wrap it: each class below calls the matching scipy constructor
 unchanged for the mean (so it is bit-identical to scipy's own answer -- see
 the docstrings for the exact numbers), and separately solves Theorem 2a's
 bordered system with the matching closed-form reproducing kernel

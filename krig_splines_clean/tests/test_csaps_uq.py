@@ -1,5 +1,5 @@
-"""`NdGridCubicSmoothingSplineUQ` (Important questions.md Q22 and
-`02_csaps_mean_and_variance.ipynb`): the closed-form mean/variance formulas,
+"""`NdGridCubicSmoothingSplineUQ` (`02_csaps_mean_and_variance.ipynb`):
+the closed-form mean/variance formulas,
 confirmed independently in 2-D and spot-checked the same way in 3-D, plus
 the `off_grid_method` contract (`"exact"` works for any dimension count,
 `"fast"` is refused outside 2-D rather than silently approximated).

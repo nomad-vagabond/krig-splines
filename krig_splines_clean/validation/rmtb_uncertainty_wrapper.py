@@ -25,9 +25,9 @@ This also found a real, worth-knowing robustness gap: without the explicit
 `cond()` check added below, `scipy.linalg.solve(..., assume_a='pos')` does
 *not* raise on a near-singular `G_reg` -- it returns a garbage answer with
 only a `LinAlgWarning` (easy to miss) as any indication something went
-wrong. Fixed here by checking `cond(G_reg)` against the `1e8` safety line
-(`Important questions.md` Q17) before trusting the solve, rather than
-silently returning a number. The original (un-checked) behavior is why this
+wrong. Fixed here by checking `cond(G_reg)` against this project's `1e8`
+safety line before trusting the solve, rather than silently returning a
+number. The original (un-checked) behavior is why this
 class is validation-notebook-only, not part of the main public API: a tool
 used for cross-checking needs to fail loudly when it can't be trusted,
 which this version now does.
@@ -49,13 +49,12 @@ class RMTBUncertaintyWrapper:
         Extra `ridge_alpha * I` added on top of `B^T B + K` before solving.
         Not RMTB's own `regularization_weight` -- a separate knob, on top of
         whatever `K` already carries. Keep small (`<=1e-8`) unless
-        deliberately testing its effect, see the `cond()`-vs-`K_kappa`-scale
-        discussion in Q20's second addendum for why "small" isn't always
-        obviously small enough.
+        deliberately testing its effect -- the `cond()`-vs-`K_kappa`-scale
+        interaction means "small" isn't always obviously small enough.
     cond_limit : float
-        Safety line for `cond(B^T B + K + ridge_alpha*I)` (default `1e8`,
-        Q17 of `Important questions.md`). `fit()` raises `RuntimeError`
-        rather than silently solving an untrustworthy system above this.
+        Safety line for `cond(B^T B + K + ridge_alpha*I)` (default `1e8`).
+        `fit()` raises `RuntimeError` rather than silently solving an
+        untrustworthy system above this.
     """
 
     def __init__(self, ridge_alpha: float = 1e-8, cond_limit: float = 1e8):
@@ -87,11 +86,10 @@ class RMTBUncertaintyWrapper:
         if self._cond_G > self.cond_limit:
             raise RuntimeError(
                 f"cond(B^T B + K + ridge_alpha*I) = {self._cond_G:.3e} exceeds "
-                f"cond_limit={self.cond_limit:.0e} (Q17 of Important questions.md) -- "
-                "refusing to solve a system this unsafe silently. scipy.linalg.solve "
-                "would not raise here on its own (confirmed directly, "
-                "07_phaseD_rmtb_variance.ipynb Cross-check 3); it would return a "
-                "garbage answer with only an easy-to-miss LinAlgWarning."
+                f"cond_limit={self.cond_limit:.0e} -- refusing to solve a system "
+                "this unsafe silently. scipy.linalg.solve would not raise here on "
+                "its own (confirmed directly); it would return a garbage answer "
+                "with only an easy-to-miss LinAlgWarning."
             )
 
         self.c_hat = la.solve(G_reg, B.T @ y, assume_a="pos")
