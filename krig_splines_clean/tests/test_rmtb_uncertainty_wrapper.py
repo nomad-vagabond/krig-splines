@@ -74,3 +74,47 @@ def test_wrapper_variance_matches_rmtbuq_on_dense_grid():
         var_wrapper = wrapper.predict(F_dense)["epistemic_var"]
         gap = np.max(np.abs(var_rmtbuq - var_wrapper))
         assert gap / np.ptp(var_rmtbuq) < 1e-8
+
+
+def test_wrapper_sigma2_diverges_from_rmtbuq_near_exact_interpolation():
+    """Documents a known discrepancy, not a bug to fix here.
+
+    `RMTBUQ`'s own Wahba estimator floors its denominator at
+    `max(n-edf, 1e-8)`; `RMTBUncertaintyWrapper`'s floors it at
+    `max(1.0, n-edf)`. Identical whenever `n-edf` is safely above `1`
+    (true in every other test in this file, and in every synthetic case
+    this project used before a real, scattered dataset pushed `edf`
+    genuinely close to `n` -- `07_rans_real_world_validation.ipynb`
+    Test 1). A very small `energy_weight` reproduces that same
+    near-exact-interpolation regime here, synthetically: `c_hat` and the
+    dense-grid variance still agree (the matrix algebra is identical),
+    but `sigma2` itself diverges by orders of magnitude, exactly tracking
+    the two floors' ratio -- not a sign of a bug in either class, but a
+    convention difference a future change to either floor should keep in
+    mind.
+    """
+    X, y = _make_dataset("random")
+    n = len(X)
+
+    kw = dict(RMTB_KW)
+    kw["energy_weight"] = 1e-12
+    kw["regularization_weight"] = 1e-8  # keeps cond(mtx) safe enough for the wrapper's own guard
+    m = RMTBUQ(**kw)
+    m.set_training_values(X, y)
+    m.train()
+    assert n - m.edf < 1e-4  # confirm this really is the near-exact-interpolation regime
+
+    Phi, _PhiT, _c = m.full_jac_dict[0]
+    Phi = Phi.toarray()
+    H = m.full_hess.toarray()
+    wrapper = RMTBUncertaintyWrapper(ridge_alpha=0.0)
+    wrapper.fit(Phi, y, H)
+
+    assert np.max(np.abs(wrapper.c_hat - m.sol.ravel())) < 1e-6  # same weight vector throughout
+
+    dof_rmtbuq = max(n - m.edf, 1e-8)
+    dof_wrapper = max(1.0, n - m.edf)
+    expected_ratio = dof_wrapper / dof_rmtbuq
+    assert expected_ratio > 100  # the two floors actually differ substantially here
+    observed_ratio = m.sigma2 / wrapper.sigma2
+    assert abs(observed_ratio - expected_ratio) / expected_ratio < 1e-6
